@@ -76,7 +76,8 @@ func initPostgres() {
 
 func initRedis() {
 	rdb = redis.NewClient(&redis.Options{
-		Addr: envOr("REDIS_ADDR", "localhost:6379"),
+		Addr:     envOr("REDIS_ADDR", "localhost:6379"),
+		Password: envOr("REDIS_PASSWORD", ""),
 	})
 	if _, err := rdb.Ping(ctx).Result(); err != nil {
 		log.Fatal("❌ 連線 Redis 失敗:", err)
