@@ -86,8 +86,11 @@ function onResult(result) {
   display: flex;
   flex-direction: column;
   max-width: 760px;
+  width: 100%;
   margin: 0 auto;
   padding: 0 20px;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 /* ── Header ────────────────────────────────────────────────────── */
