@@ -1,160 +1,190 @@
-# URL Shortener Service
+<div align="center">
 
-一個使用 **Golang + Gin + PostgreSQL + Redis** 建置的短網址服務。
-主要功能包括： - 短網址生成
-- 短網址重定向
-- 健康檢查
-- 短網址統計
+# ⚡ SnapLink
 
-------------------------------------------------------------------------
+### 把落落長的網址，變成一個俐落的短連結
 
-## 🚀 功能介紹
+[![Go](https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white)](https://golang.org/)
+[![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?style=flat-square&logo=vue.js&logoColor=white)](https://vuejs.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-Cache-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 
-1.  **短網址生成 (`POST /shorten`)**
-    -   接收一個長網址，生成隨機 8 碼短碼。
-    -   短碼會存入 PostgreSQL 與 Redis（Redis 有效期 7 天）。
-2.  **短網址重定向 (`GET /:code`)**
-    -   使用短碼查詢原始網址。
-    -   先查 Redis，若無則查 PostgreSQL 並回填快取。
-    -   302 重定向至原始網址。
-3.  **健康檢查 (`GET /health`)**
-    -   回傳服務狀態 `{"status": "ok"}`。
-4.  **統計資訊**
-    -   `GET /stats`：目前 Redis 中短網址數量。
-    -   `GET /stats/today`：今日新建短網址數量。
+</div>
 
-------------------------------------------------------------------------
+---
 
-## 🛠️ 技術架構
+## ✨ 為什麼選擇 SnapLink？
 
--   **語言/框架**：Golang + Gin
--   **資料庫**：PostgreSQL
--   **快取**：Redis（加速短碼查詢）
--   **JSON 格式**：`UrlData` 結構（含 `url` 與 `created_at`）
+- 🚀 **毫秒級跳轉** — Redis 快取優先，直接命中不過 DB
+- 🔒 **碰撞保護** — Base62 短碼以 PK 唯一性為準，衝突自動重試
+- 📊 **即時統計** — 掌握總量與今日新增數字
+- 🐳 **一鍵啟動** — Docker Compose 帶起整個環境，零設定煩惱
+- 🎨 **精緻前端** — Vue 3 粒子動畫介面，顏值與效能兼具
 
-------------------------------------------------------------------------
+---
 
-## 📦 安裝與啟動
+## 🏗 技術架構
 
-### 1. 環境需求
-
--   Go 1.20+
--   PostgreSQL 14+
--   Redis 6+
-
-### 2. 設定資料庫
-
-啟動 PostgreSQL，並建立資料庫：
-
-``` sql
-CREATE DATABASE shortener;
+```
+使用者瀏覽器
+    │
+    ▼
+Vue 3 + Vite (前端)
+    │  POST /shorten
+    ▼
+Go + Gin (API Server)
+    ├─► Redis  ◄──── 快取命中 → 302 跳轉 (毫秒級)
+    └─► PostgreSQL ◄─ 未命中 → 查詢回填 → 302 跳轉
 ```
 
-### 3. 修改連線設定
+| 層級 | 技術 |
+|------|------|
+| 後端 | Go 1.24 + Gin |
+| 前端 | Vue 3 + Vite |
+| 資料庫 | PostgreSQL 14+ |
+| 快取 | Redis（7 天 TTL） |
+| 容器化 | Docker + Docker Compose |
 
-在 `initPostgres()` 中修改連線字串：
+---
 
-``` go
-connStr := "host=localhost port=5432 user=user password=pass dbname=shortener sslmode=disable"
+## 🚀 快速啟動
+
+### 方式一：Docker Compose（推薦）
+
+```bash
+# 一行指令，啟動全部服務
+docker-compose -f docker-compose-postgres.yaml up -d
 ```
 
-### 4. 啟動 Redis
+服務啟動後，打開 [http://localhost:8080](http://localhost:8080) 即可使用。
 
-``` bash
+---
+
+### 方式二：本機開發
+
+**1. 啟動依賴服務**
+
+```bash
+# PostgreSQL
+docker-compose -f docker-compose-postgres.yaml up -d postgres
+
+# Redis
 redis-server
 ```
 
-### 5. 啟動服務
+**2. 設定環境變數**（可複製 `.env.example`）
 
-``` bash
+```bash
+cp .env.example .env
+```
+
+**3. 啟動後端**
+
+```bash
 go run main.go
 ```
 
-------------------------------------------------------------------------
+**4. 啟動前端開發伺服器**
 
-## 📡 API 使用方式
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-### 1. 建立短網址
+---
 
-**Request**
+## 🌐 環境變數
 
-``` bash
-POST /shorten
-Content-Type: application/json
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `POSTGRES_HOST` | `localhost` | PostgreSQL 主機位址 |
+| `POSTGRES_PORT` | `5432` | PostgreSQL 連接埠 |
+| `POSTGRES_USER` | `user` | 資料庫使用者 |
+| `POSTGRES_PASSWORD` | `pass` | 資料庫密碼 |
+| `POSTGRES_DB` | `shortener` | 資料庫名稱 |
+| `REDIS_ADDR` | `localhost:6379` | Redis 位址 |
+| `BASE_URL` | `http://localhost:8080` | 短網址前綴（對外網域） |
 
+---
+
+## 📡 API 文件
+
+### `POST /shorten` — 建立短網址
+
+```bash
+curl -X POST http://localhost:8080/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/very/long/url/that/nobody/wants/to-type"}'
+```
+
+```json
 {
-  "url": "https://example.com/long-url"
+  "short_url": "http://localhost:8080/aB3xYz9K"
 }
 ```
 
-**Response**
+---
 
-``` json
-{
-  "short_url": "http://localhost:8080/abc123xy"
-}
+### `GET /:code` — 短碼跳轉
+
+```
+GET /aB3xYz9K  →  302 Redirect → https://example.com/...
 ```
 
-------------------------------------------------------------------------
+---
 
-### 2. 使用短碼跳轉
+### `GET /stats` — 總數統計
 
-**Request**
-
-``` bash
-GET /abc123xy
+```json
+{ "shortened_url_count": 42 }
 ```
 
-**Response** - 302 Redirect → `https://example.com/long-url`
+### `GET /stats/today` — 今日新增
 
-------------------------------------------------------------------------
-
-### 3. 健康檢查
-
-``` bash
-GET /health
+```json
+{ "shortened_url_count_today": 7 }
 ```
 
-**Response**
+### `GET /health` — 健康檢查
 
-``` json
-{"status":"ok"}
+```json
+{ "status": "ok" }
 ```
 
-------------------------------------------------------------------------
+---
 
-### 4. 總數統計
+## ☁️ 部署到 Zeabur
 
-``` bash
-GET /stats
+1. Fork 此 Repo
+2. 前往 [zeabur.com](https://zeabur.com) → New Project
+3. 新增 **PostgreSQL** 與 **Redis** 服務
+4. 連結此 GitHub Repo（自動偵測 Dockerfile 建置）
+5. 設定環境變數，並將 `BASE_URL` 設為你的 Zeabur 網域
+6. 產生網域，部署完成 🎉
+
+---
+
+## 📁 專案結構
+
+```
+.
+├── main.go                  # 後端主程式（Go + Gin）
+├── Dockerfile               # 三階段 Docker build
+├── docker-compose-postgres.yaml
+├── frontend/                # 前端原始碼（Vue 3 + Vite）
+│   └── src/
+│       └── components/      # ShortenForm, ResultCard, StatsPanel...
+├── static/                  # 前端 build 輸出（由 Go 直接 serve）
+├── nginx/                   # Nginx 設定（選用）
+└── .env.example             # 環境變數範例
 ```
 
-**Response**
+---
 
-``` json
-{"shortened_url_count": 12}
-```
+<div align="center">
 
-------------------------------------------------------------------------
+Made with ❤️ using Go & Vue 3
 
-### 5. 今日新增數量
-
-``` bash
-GET /stats/today
-```
-
-**Response**
-
-``` json
-{"shortened_url_count_today": 3}
-```
-
-------------------------------------------------------------------------
-
-## ⚠️ 注意事項
-
--   Redis 目前設置快取有效期為 **7 天**，過期會回退至 PostgreSQL 查詢。
--   `/stats/today` 目前比對方式為 `CreatedAt`，使用 **字串比對
-    YYYY-MM-DD**，如果需要精確判斷，建議改為 timestamp。
--   短碼長度固定為 **8 碼 Base62**，若需縮短或調整請修改
-    `RandString()`。
+</div>
