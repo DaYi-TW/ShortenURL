@@ -1,0 +1,66 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: shortenurl_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app:
+        condition: service_started
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shortenurl_app
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      BASE_URL:          "${BASE_URL:-http://localhost}"
+      POSTGRES_HOST:     postgres
+      POSTGRES_PORT:     5432
+      POSTGRES_USER:     ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB:       ${POSTGRES_DB:-shortener}
+      REDIS_ADDR:        redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:13-alpine
+    container_name: shortenurl_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB:       ${POSTGRES_DB:-shortener}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-shortener}"]
+      interval: 5s
+      timeout:  5s
+      retries:  10
+
+  redis:
+    image: redis:7-alpine
+    container_name: shortenurl_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:     ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout:  3s
+      retries:  10
+
+volumes:
+  pg_data:
+  redis_data:

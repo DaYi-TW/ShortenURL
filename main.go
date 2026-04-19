@@ -4,51 +4,70 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
-/*
-網址暫存到記憶體
-*/
+const (
+	cacheKeyPrefix     = "url:"
+	pgUniqueViolation  = pq.ErrorCode("23505")
+	maxCodeRetries     = 10
+)
 
-var urlStore = make(map[string]string)
-
-/*
-定義輸入結構
-*/
-
-type UrlRequest struct {
-	Url string `json:"url" binding:"required"`
+type URLRequest struct {
+	URL string `json:"url" binding:"required"`
 }
 
-type UrlData struct {
-	Url       string `json:"url"`
+type URLData struct {
+	URL       string `json:"url"`
 	CreatedAt string `json:"created_at"`
 }
 
-// ----------------- 初始化 -----------------
+var (
+	letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	ctx     = context.Background()
+	rdb     *redis.Client
+	db      *sql.DB
+	base    string // resolved once at startup
+)
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func initPostgres() {
 	var err error
-	connStr := "host=localhost port=5432  user=user password=pass dbname=shortener sslmode=disable"
+	connStr := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		envOr("POSTGRES_HOST", "localhost"),
+		envOr("POSTGRES_PORT", "5432"),
+		envOr("POSTGRES_USER", "user"),
+		envOr("POSTGRES_PASSWORD", "pass"),
+		envOr("POSTGRES_DB", "shortener"),
+	)
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("❌ 連線 Postgres 失敗:", err)
 	}
-
-	// 建立資料表（如果還沒建立）
 	_, err = db.Exec(`
-	CREATE TABLE IF NOT EXISTS short_urls (
-		code VARCHAR(10) PRIMARY KEY,
-		url TEXT NOT NULL,
-		created_at TIMESTAMP DEFAULT now()
-	);`)
+		CREATE TABLE IF NOT EXISTS short_urls (
+			code       VARCHAR(10) PRIMARY KEY,
+			url        TEXT        NOT NULL,
+			created_at TIMESTAMP   DEFAULT now()
+		);`)
 	if err != nil {
 		log.Fatal("❌ 建表失敗:", err)
 	}
@@ -57,32 +76,15 @@ func initPostgres() {
 
 func initRedis() {
 	rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // docker-compose service name
+		Addr: envOr("REDIS_ADDR", "localhost:6379"),
 	})
-	_, err := rdb.Ping(ctx).Result()
-	if err != nil {
+	if _, err := rdb.Ping(ctx).Result(); err != nil {
 		log.Fatal("❌ 連線 Redis 失敗:", err)
 	}
 	log.Println("✅ Redis 已連線")
 }
 
-/*
-亂碼生成
-*/
-// Base62 字元集
-var (
-	letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-	ctx     = context.Background()
-	rdb     = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	db *sql.DB
-)
-
-// 生成隨機短碼
-func RandString(length int) string {
+func randString(length int) string {
 	b := make([]rune, length)
 	for i := range b {
 		b[i] = letters[rand.Intn(len(letters))]
@@ -90,73 +92,127 @@ func RandString(length int) string {
 	return string(b)
 }
 
+func cacheURL(code, url, createdAt string, ttl time.Duration) error {
+	data := URLData{URL: url, CreatedAt: createdAt}
+	jsonValue, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return rdb.Set(ctx, cacheKeyPrefix+code, jsonValue, ttl).Err()
+}
+
+func isDuplicateKey(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == pgUniqueViolation
+}
+
 func main() {
+	if v := os.Getenv("BASE_URL"); v != "" {
+		base = v
+	} else {
+		base = "http://localhost:8080"
+	}
+
 	initPostgres()
 	initRedis()
 
 	r := gin.Default()
 
-	// 短網址生成
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST"},
+		AllowHeaders:     []string{"Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	// Serve built frontend
+	r.Static("/assets", "./static/assets")
+	r.StaticFile("/", "./static/index.html")
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	r.GET("/stats", func(c *gin.Context) {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM short_urls").Scan(&count); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve stats"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"shortened_url_count": count})
+	})
+
+	r.GET("/stats/today", func(c *gin.Context) {
+		var count int
+		err := db.QueryRow(
+			"SELECT COUNT(*) FROM short_urls WHERE created_at >= current_date",
+		).Scan(&count)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve stats"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"shortened_url_count_today": count})
+	})
+
 	r.POST("/shorten", func(c *gin.Context) {
-		var req UrlRequest
+		var req URLRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		// 產生唯一短碼
+		// Generate a unique code; rely on DB primary-key constraint as the
+		// authoritative uniqueness check — Redis may not hold expired codes.
 		var code string
-		for {
-			code = RandString(8)
-			if _, err := rdb.Get(ctx, code).Result(); err == redis.Nil {
+		var createdAt time.Time
+		for i := 0; i < maxCodeRetries; i++ {
+			code = randString(8)
+			err := db.QueryRow(
+				"INSERT INTO short_urls (code, url) VALUES ($1, $2) RETURNING created_at",
+				code, req.URL,
+			).Scan(&createdAt)
+			if err == nil {
 				break
-			} else if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "redis error"})
+			}
+			// Any error other than a duplicate-key violation is fatal.
+			if !isDuplicateKey(err) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save to DB"})
+				return
+			}
+			if i == maxCodeRetries-1 {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate unique code"})
 				return
 			}
 		}
 
-		// 寫入 Postgres
-		_, err := db.Exec("INSERT INTO short_urls (code, url) VALUES ($1, $2)", code, req.Url)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save to DB"})
-			return
+		// Cache write is best-effort; the URL is already durably stored in DB.
+		if err := cacheURL(code, req.URL, createdAt.Format(time.RFC3339), 7*24*time.Hour); err != nil {
+			log.Printf("⚠️ 快取寫入失敗 (code=%s): %v", code, err)
 		}
 
-		// 建立 JSON 資料 (含創建時間)
-		data := UrlData{
-			Url:       req.Url,
-			CreatedAt: time.Now().Format(time.RFC3339),
-		}
-		jsonValue, _ := json.Marshal(data)
-
-		// 存入 Redis
-		if err := rdb.Set(ctx, code, jsonValue, 7*24*time.Hour).Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save"})
-			return
-		}
-
-		shortUrl := "http://localhost:8080/" + code
-		c.JSON(http.StatusOK, gin.H{"short_url": shortUrl})
+		c.JSON(http.StatusOK, gin.H{"short_url": base + "/" + code})
 	})
 
-	//短網址重定向
 	r.GET("/:code", func(c *gin.Context) {
 		code := c.Param("code")
 
-		// 先查 Redis
-		val, err := rdb.Get(ctx, code).Result()
+		val, err := rdb.Get(ctx, cacheKeyPrefix+code).Result()
 		if err == nil {
-			// 命中快取
-			var data UrlData
-			json.Unmarshal([]byte(val), &data)
-			c.Redirect(http.StatusFound, data.Url)
+			var data URLData
+			if err := json.Unmarshal([]byte(val), &data); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid cache entry"})
+				return
+			}
+			c.Redirect(http.StatusFound, data.URL)
 			return
 		}
 
-		// Redis 沒有 → 查 Postgres
 		var url string
-		err = db.QueryRow("SELECT url FROM short_urls WHERE code=$1", code).Scan(&url)
+		var createdAt time.Time
+		err = db.QueryRow(
+			"SELECT url, created_at FROM short_urls WHERE code=$1", code,
+		).Scan(&url, &createdAt)
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -165,57 +221,13 @@ func main() {
 			return
 		}
 
-		// 存回 Redis（避免下次又查 DB）
-		data := UrlData{
-			Url:       url,
-			CreatedAt: time.Now().Format(time.RFC3339),
+		// Best-effort cache re-population; don't block the redirect on failure.
+		if err := cacheURL(code, url, createdAt.Format(time.RFC3339), 24*time.Hour); err != nil {
+			log.Printf("⚠️ 快取回填失敗 (code=%s): %v", code, err)
 		}
-		jsonValue, _ := json.Marshal(data)
-		rdb.Set(ctx, code, jsonValue, 24*time.Hour)
 
 		c.Redirect(http.StatusFound, url)
 	})
 
-	//健康檢查
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-
-	//取得所有短網址的數量
-	r.GET("/stats", func(c *gin.Context) {
-		count := 0
-		iter := rdb.Scan(ctx, 0, "", 0).Iterator()
-		for iter.Next(ctx) {
-			count++
-		}
-		if err := iter.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve stats"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"shortened_url_count": count})
-	})
-
-	//今日創建的短網址數量
-	r.GET("/stats/today", func(c *gin.Context) {
-		count := 0
-		today := time.Now().Format("2006-01-02")
-		iter := rdb.Scan(ctx, 0, "", 0).Iterator()
-		for iter.Next(ctx) {
-			var data UrlData
-			jsonData, err := rdb.Get(ctx, iter.Val()).Result()
-			if err == nil {
-				json.Unmarshal([]byte(jsonData), &data)
-				if data.CreatedAt == today {
-					count++
-				}
-			}
-		}
-		if err := iter.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve stats"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"shortened_url_count_today": count})
-	})
-
-	r.Run(":8080")
+	r.Run(":" + envOr("PORT", "8080"))
 }

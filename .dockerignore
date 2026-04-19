@@ -1,0 +1,13 @@
+# 依賴
+node_modules/
+frontend/node_modules/
+
+# 編譯產物
+*.exe
+ShortenURL.exe
+
+# 環境變數（敏感資訊）
+.env
+
+# 前端建置快取
+frontend/.vite/
